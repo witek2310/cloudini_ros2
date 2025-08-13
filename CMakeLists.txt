@@ -78,4 +78,9 @@ target_include_directories(decompress
   cloudini_lib
 )
 
+install(DIRECTORY
+  launch
+  DESTINATION share/${PROJECT_NAME}/
+)
+
 ament_package()

@@ -16,6 +16,8 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <filesystem>
+#include <fstream>
 
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/string.hpp"
@@ -37,22 +39,42 @@ class CloudiniROS2 : public rclcpp::Node
 {
 public:
   CloudiniROS2()
-  : Node("CloudiniROS2"), count_(0)
+  : Node("CloudiniROS2")
   {
     this->declare_parameter<std::string>("PC_topic", "/velodyne/velodyne_points");
     this->declare_parameter<double>("resolution", 0.001);
+    this->declare_parameter<std::string>("csv_folder_path", "/tmp");
 
-    this->get_parameter("resolution", resolution_);
+    _resolution = this->get_parameter("resolution").as_double();
+
 
 
     std::string pc_topic;
     this->get_parameter("PC_topic", pc_topic);
     RCLCPP_INFO(this->get_logger(), "Subscribing to point cloud topic: %s", pc_topic.c_str());
-    RCLCPP_INFO(this->get_logger(), "Using resolution: %f", resolution_);
-
-    _compressed_pc_publisher_ = this->create_publisher<cloudini_ros2::msg::CompressedPointCloud>("compressed_pc", 10);
+    
+    RCLCPP_INFO(this->get_logger(), "Using resolution: %f", _resolution);
+    
+    _compressed_pc_publisher = this->create_publisher<cloudini_ros2::msg::CompressedPointCloud>("compressed_pc", 10);
     _pc_subscription = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-      pc_topic, 10, std::bind(&CloudiniROS2::pc_callback, this, std::placeholders::_1));
+    pc_topic, 10, std::bind(&CloudiniROS2::pc_callback, this, std::placeholders::_1));
+    
+    std::string folder_path;
+    this->get_parameter("csv_folder_path", folder_path);
+      
+    _csv_file_path = folder_path + "/compress_cloudini.csv";
+    std::cout << _csv_file_path << std::endl;
+    RCLCPP_INFO(this->get_logger(), "saved dataunder: %s", _csv_file_path.c_str());
+
+
+    if (!std::filesystem::exists(_csv_file_path)) {
+      std::filesystem::create_directories(std::filesystem::path(_csv_file_path).parent_path()); 
+      std::ofstream file(_csv_file_path);
+      if (file.is_open()) {
+        file << "points_number,point_cloud_size,compresion_time,size_after_compresion\n";  // Header row
+        file.close();
+      }
+    }
   }
 
 private:
@@ -60,10 +82,9 @@ private:
   {
     RCLCPP_INFO(this->get_logger(), "Received point cloud with width: %u", raw->width);
 
-    // Here you would implement the compression logic
-    // For demonstration, we will just create an empty CompressedPointCloud message
 
-    auto info = ConvertToEncodingInfo(raw, resolution_);
+    auto start_compresion = std::chrono::steady_clock::now();
+    auto info = ConvertToEncodingInfo(raw, _resolution);
     Cloudini::PointcloudEncoder encoder(info);
 
     cloudini_ros2::msg::CompressedPointCloud compressed_msg;
@@ -78,13 +99,24 @@ private:
     compressed_msg.data.resize(new_size); // resize to the actual size of compressed data
     
     // publish the transformed message
-    _compressed_pc_publisher_->publish(compressed_msg);  
+    auto end_compresion = std::chrono::steady_clock::now();
+    auto elapsed_compresion = std::chrono::duration_cast<std::chrono::microseconds>(end_compresion - start_compresion).count();
+    _compressed_pc_publisher->publish(compressed_msg);  
+
+    std::ofstream ofs(_csv_file_path, std::ios_base::app);
+    if (!ofs) {
+      std::filesystem::create_directories(std::filesystem::path(_csv_file_path).parent_path()); 
+      RCLCPP_ERROR(this->get_logger(), "Could not open file: %s", _csv_file_path.c_str());
+      return;
+    }
+    ofs << raw->width * raw->height << "," << raw->row_step * raw->height << ","<< elapsed_compresion << "," << new_size << "\n";
+    ofs.close();
   }
 
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr _pc_subscription;
-  rclcpp::Publisher<cloudini_ros2::msg::CompressedPointCloud>::SharedPtr _compressed_pc_publisher_;
-  double resolution_ = 0.001; // Default resolution for compression
-  size_t count_;
+  rclcpp::Publisher<cloudini_ros2::msg::CompressedPointCloud>::SharedPtr _compressed_pc_publisher;
+  double _resolution = 0.001; // Default resolution for compression
+  std::string _csv_file_path;
 };
 
 int main(int argc, char * argv[])

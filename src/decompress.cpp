@@ -16,6 +16,8 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <filesystem>
+#include <fstream>
 
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/string.hpp"
@@ -24,10 +26,7 @@
 
 #include <cloudini_lib/cloudini.hpp>
 
-using namespace std::chrono_literals;
 
-/* This example creates a subclass of Node and uses std::bind() to register a
- * member function as a callback from the timer. */
 
 Cloudini::EncodingInfo ConvertToEncodingInfo(const sensor_msgs::msg::PointCloud2::SharedPtr msg, float resolution);
 
@@ -35,33 +34,39 @@ class CloudiniROS2 : public rclcpp::Node
 {
 public:
   CloudiniROS2()
-  : Node("CloudiniROS2"), count_(0)
+  : Node("CloudiniROS2")
   {
-    // this->declare_parameter<std::string>("PC_topic", "/velodyne/velodyne_points");
-    // this->declare_parameter<double>("resolution", 0.001);
+    this->declare_parameter<std::string>("csv_folder_path", "/tmp");
 
-    // this->get_parameter("resolution", resolution_);
-
-
-    // std::string pc_topic;
-    // this->get_parameter("PC_topic", pc_topic);
-    // RCLCPP_INFO(this->get_logger(), "Subscribing to point cloud topic: %s", pc_topic.c_str());
-    // RCLCPP_INFO(this->get_logger(), "Using resolution: %f", resolution_);
-
-    _compressed_pc_publisher_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/decompressed_cloudini", 10);
+    _compressed_pc_publisher = this->create_publisher<sensor_msgs::msg::PointCloud2>("/decompressed_cloudini", 10);
     _pc_subscription = this->create_subscription<cloudini_ros2::msg::CompressedPointCloud>(
       "compressed_pc", 10, std::bind(&CloudiniROS2::pc_callback, this, std::placeholders::_1));
     decoder_ = std::make_shared<Cloudini::PointcloudDecoder>();
+
+
+    std::string folder_path;
+    this->get_parameter("csv_folder_path", folder_path);
+    _csv_file_path = folder_path + "/decompress_cloudini.csv";
+
+    if (!std::filesystem::exists(_csv_file_path)) {
+      std::filesystem::create_directories(std::filesystem::path(_csv_file_path).parent_path()); 
+      std::ofstream file(_csv_file_path);
+      if (file.is_open()) {
+        file << "time_stamp,points_number_after_decompression,decompresion_time,size_before_decompression\n";
+        file.close();
+      }
+    }
   }
 
 private:
-  void pc_callback(const cloudini_ros2::msg::CompressedPointCloud::SharedPtr msg)
-{
+  void pc_callback(const cloudini_ros2::msg::CompressedPointCloud::SharedPtr msg){
     if (msg->data.empty()) {
         RCLCPP_ERROR(this->get_logger(), "Received empty compressed point cloud data!");
         return;
     }
 
+
+    auto start = std::chrono::high_resolution_clock::now();
     Cloudini::ConstBufferView input(msg->data.data(), msg->data.size());
     auto info = Cloudini::DecodeHeader(input);
 
@@ -92,14 +97,26 @@ private:
 
     decoder_->decode(info, input, output);
 
-    _compressed_pc_publisher_->publish(*result);
+    auto end = std::chrono::high_resolution_clock::now();
+    
+    _compressed_pc_publisher->publish(*result);
+
+    std::chrono::duration<double, std::milli> decompression_time = end - start;
+
+    std::ofstream ofs(_csv_file_path, std::ios_base::app);
+    if (!ofs) {
+      std::filesystem::create_directories(std::filesystem::path(_csv_file_path).parent_path()); 
+      RCLCPP_ERROR(this->get_logger(), "Could not open file: %s", _csv_file_path.c_str());
+      return;
+    }
+    ofs << result->width * result->height << "," << decompression_time.count() << "," << msg->data.size() <<"\n";
+    ofs.close();
 }
 
   std::shared_ptr<Cloudini::PointcloudDecoder> decoder_ = std::make_shared<Cloudini::PointcloudDecoder>();
   rclcpp::Subscription<cloudini_ros2::msg::CompressedPointCloud>::SharedPtr _pc_subscription;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr _compressed_pc_publisher_;
-  double resolution_ = 0.001; // Default resolution for compression
-  size_t count_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr _compressed_pc_publisher;
+  std::string _csv_file_path;
 };
 
 int main(int argc, char * argv[])
